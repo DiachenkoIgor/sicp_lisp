@@ -1,0 +1,827 @@
+(define (get-element data pos)
+	(if (< pos 1)
+		(car data)
+		(get-element (cdr data) (- pos 1))
+		)
+	)
+
+(define (lexical-address-operation lexical-address env operation)
+	(let ((frame (car lexical-address))
+			(position (cadr lexical-address)))
+		(let ((variable (get-element (get-element env frame) position)))
+				(operation variable)
+			)
+		)
+	)
+
+(define (lexical-address-lookup lexical-address env)
+	(lexical-address-operation
+	 lexical-address
+	 env
+	  (lambda (variable)
+	  		(if (eq? unassigned (cdr variable))
+				(error "*unassigned* variable: " variable)
+				(cdr variable)
+				)
+	  	)
+	)
+)
+
+(define (lexical-address-set! lexical-address env value)
+	(lexical-address-operation
+	 lexical-address
+	 env
+	  (lambda (variable)
+	  		(if (OR (null? variable) (NOT (pair? variable)))
+				(error "Null or not variable: " variable)
+				(set-cdr! variable value)
+				)
+	  	)
+	)
+)
+
+(define (find-variable var compile-env)
+
+	(define (find-variable-in-frame var vars count)
+		(cond ((eq? vars '()) -1)
+			((eq? var (car vars)) count)
+			(else (find-variable-in-frame var (cdr vars) (+ count 1)))
+
+			)
+		)
+
+	(define (find-variable-inner var frames count)
+		(if (eq? '() frames)
+			'not-found
+			(let ((result (find-variable-in-frame var (car frames) 0))) 
+				(if (< result 0)
+					(find-variable-inner var (cdr frames) (+ count 1))
+					(cons count result)
+					)
+				)
+			)
+		)
+	(find-variable-inner var compile-env 0)
+	)
+
+(define (tagged-list? exp tag)
+  (if (pair? exp)
+    (eq? (car exp) tag)
+    false))
+
+(define (self-evaluating? exp)
+  (cond ((number? exp) true)
+      ((string? exp) true)
+      (else false)))
+
+(define (last-exp? seq) (null? (cdr seq)))
+
+
+(define (quoted? exp) (tagged-list? exp 'quote))
+
+(define (variable? exp)
+ (symbol? exp))
+
+ (define (assignment? exp) (tagged-list? exp 'set!))
+
+ (define (assignment-value exp) (caddr exp))
+ (define (assignment-variable exp) (cadr exp))
+
+ (define (definition? exp) (tagged-list? exp 'define))
+
+ (define (if? exp) (tagged-list? exp 'if))
+
+ (define (lambda? exp) (tagged-list? exp 'lambda))
+
+ (define (begin? exp) (tagged-list? exp 'begin))
+
+ (define (cond? exp) (tagged-list? exp 'cond))
+
+(define (plus? exp) (tagged-list? exp '+))
+(define (minus? exp) (tagged-list? exp '-))
+(define (equal-c? exp) (tagged-list? exp '=))
+(define (mult? exp) (tagged-list? exp '*))
+
+ (define (application? exp) (pair? exp))
+
+ (define (definition-variable exp)
+  (if (symbol? (cadr exp))
+    (cadr exp)
+    (caadr exp)))
+
+ (define (definition-value exp)
+  (if (symbol? (cadr exp))
+    (caddr exp)
+    (make-lambda (cdadr exp)
+          (cddr exp))))
+
+ (define (operator exp) (car exp))
+(define (operands exp) (cdr exp))
+
+ (define (make-lambda parameters body)
+  (cons 'lambda (cons parameters body)))
+
+ (define (lambda-parameters exp) (cadr exp))
+(define (lambda-body exp) (cddr exp))
+
+(define (scan-defines exp)
+	(define (get-defines body)
+		(cond ((null? body) '())
+			((definition? (car body)) 
+					(cons (cons (definition-variable (car body)) (definition-value (car body)))
+						 (get-defines (cdr body))))
+			(else (get-defines (cdr body))) 
+			)
+		)
+	(get-defines exp)
+)
+
+(define (filter-defines exp)
+		(cond ((null? exp) '())
+			((definition? (car exp)) (filter-defines (cdr exp)))
+			(else (cons (car exp) (filter-defines (cdr exp)))) 
+			)
+)
+
+(define (first-exp seq) (car seq))
+(define (rest-exps seq) (cdr seq))
+
+(define (if-predicate exp) (cadr exp))
+(define (if-consequent exp) (caddr exp))
+(define (if-alternative exp)
+(if (not (null? (cdddr exp)))
+  (cadddr exp)
+  'false))
+
+(define (no-operands? ops) (null? ops))
+(define (first-operand ops) (car ops))
+(define (rest-operands ops) (cdr ops))
+
+
+
+; target -- which speciﬁes the register in which the compiled code is to return the value of the expression
+; linkage -- descriptor, which describes how the code resulting from the compilation of the expression should proceed when it has ﬁnished its execution
+	; • continue at the next instruction in sequence (this is speciﬁed by the linkage descriptor next),
+	; • return from the procedure being compiled (this is speciﬁed by the linkage descriptor return)
+			; If the linkage is return, we don’t need to set up continue - With this implementation of the return linkage, the compiler generates
+			; tail-recursive code
+	; • jump to a named entry point (this is speciﬁed by using the designated label as the linkage descriptor).
+
+(define (compile exp target linkage compile-env)
+	(cond ((self-evaluating? exp)
+				(compile-self-evaluating exp target linkage))
+		((quoted? exp) 
+			(compile-quoted exp target linkage))
+		((variable? exp)
+				(compile-variable exp target linkage compile-env))
+		((assignment? exp)
+				(compile-assignment exp target linkage compile-env))
+		((definition? exp)
+				(compile-definition exp target linkage compile-env))
+		((if? exp) 
+				(compile-if exp target linkage compile-env))
+		((lambda? exp) 
+				(compile-lambda exp target linkage compile-env))
+		((begin? exp)
+				(compile-sequence (begin-actions exp) target linkage compile-env))
+		((cond? exp)
+				(compile (cond->if exp) target linkage))
+		((plus? exp)
+				(compile-plus exp target linkage compile-env))
+		((equal-c? exp)
+				(compile-equal exp target linkage compile-env))
+		((minus? exp)
+				(compile-minus exp target linkage compile-env))
+		((mult? exp)
+				(compile-mult exp target linkage compile-env))
+		((application? exp)
+				(compile-application exp target linkage compile-env))
+		(else (error "Unknown expression type: COMPILE" exp))))
+
+(define (make-instruction-sequence needs modifies statements)
+	(list needs modifies statements))
+
+(define all-regs '(env proc val argl continue))
+
+(define (empty-instruction-sequence)
+	(make-instruction-sequence '() '() '()))
+
+(define (compile-linkage linkage)
+	(cond ((eq? linkage 'return)
+				(make-instruction-sequence 
+									'(continue)
+									'()
+									'((goto (reg continue)))))
+			((eq? linkage 'next) (empty-instruction-sequence))
+			(else
+				(make-instruction-sequence 
+							'()
+							'()
+							`((goto (label ,linkage)))))))
+
+(define (end-with-linkage linkage instruction-sequence)
+	(preserving '(continue) instruction-sequence (compile-linkage linkage)))
+
+(define (compile-self-evaluating exp target linkage)
+	(end-with-linkage linkage
+			(make-instruction-sequence '() (list target)
+						`((assign ,target (const ,exp))))))
+
+(define (compile-quoted exp target linkage)
+	(end-with-linkage linkage
+			(make-instruction-sequence '() (list target)
+						`((assign ,target (const ,(text-of-quotation exp)))))))
+
+
+(define (compile-variable exp target linkage compile-env)
+	(let ((lexical (find-variable exp compile-env))) 
+		(if (eq? 'not-found lexical)
+
+				(end-with-linkage linkage
+					(make-instruction-sequence '(env) (list target)
+						`((assign ,target
+						(op lookup-variable-value)
+						(const ,exp)
+						(reg env)))))
+
+				(end-with-linkage linkage
+					(make-instruction-sequence '(env) (list target)
+						`((assign ,target
+						(op lexical-address-lookup)
+						(const ,lexical)
+						(reg env)))))
+			)
+
+		)
+	)
+
+#| The recursive compilation has target val and linkage next so that the code will put
+its result into val and continue with the code that is appended after it |#
+
+(define (compile-assignment exp target linkage compile-env)
+	(let ((var (assignment-variable exp))
+		(lexical (find-variable exp compile-env)) 
+		(get-value-code
+				(compile (assignment-value exp) 'val 'next compile-env)))
+
+		(if (eq? 'not-found lexical)
+
+			(end-with-linkage linkage
+				(preserving '(env) 
+					get-value-code
+					(make-instruction-sequence '(env val) (list target)
+							`((perform (op set-variable-value!) (const ,var) (reg val) (reg env))
+							(assign ,target (const ok))))))
+
+			(end-with-linkage linkage
+				(preserving '(env) 
+					get-value-code
+					(make-instruction-sequence '(env val) (list target)
+							`((perform (op lexical-address-set!) (const ,lexical) (reg env) (reg val))
+							(assign ,target (const ok))))))
+
+			)
+		)
+)
+
+
+(define (compile-definition exp target linkage compile-env)
+	(let ((var (definition-variable exp))
+			(get-value-code
+				(compile (definition-value exp) 'val 'next compile-env)))
+	(end-with-linkage linkage (preserving '(env)
+			get-value-code
+			(make-instruction-sequence '(env val) (list target)
+				`((perform (op define-variable!) (const ,var) (reg val) (reg env))
+					(assign ,target (const ok))))))))
+
+
+; We can’t just use the labels true-branch, false-branch, and after-if
+(define label-counter 0)
+	(define (new-label-number)
+	(set! label-counter (+ 1 label-counter))
+	label-counter)
+(define (make-label name)
+	(string->symbol
+		(string-append (symbol->string name)
+					(number->string (new-label-number)))))
+
+; The only slight complication is in how the linkage for the true branch should be
+; handled. If the linkage for the conditional is return or a label, then the
+; true and false branches will both use this same linkage. If the linkage
+; is next, the true branch ends with a jump around the code for the false
+; branch to the label at the end of the conditional.
+
+(define (compile-if exp target linkage compile-env)
+	(let ((t-branch (make-label 'true-branch))
+		(f-branch (make-label 'false-branch))
+		(after-if (make-label 'after-if)))
+
+		(let ((consequent-linkage (if (eq? linkage 'next) after-if linkage)))
+			
+			(let ((p-code (compile (if-predicate exp)
+			 		'val 'next compile-env))
+				(c-code 
+					(compile (if-consequent exp) target
+					consequent-linkage compile-env))
+				(a-code
+					(compile (if-alternative exp) target linkage compile-env)))
+
+				(preserving '(env continue) p-code
+						(append-instruction-sequences
+								(make-instruction-sequence '(val) '() `((test (op false?) (reg val))
+										(branch (label ,f-branch))))
+								(parallel-instruction-sequences
+										(append-instruction-sequences t-branch c-code)
+										(append-instruction-sequences f-branch a-code))
+								after-if))))))
+
+
+(define (compile-sequence seq target linkage compile-env)
+	(if (last-exp? seq)
+		(compile (first-exp seq) target linkage compile-env)
+		(preserving
+			'(env continue)
+			(compile (first-exp seq) target 'next compile-env)
+			(compile-sequence (rest-exps seq) target linkage compile-env))))
+
+(define (make-compiled-procedure entry env)
+	(list 'compiled-procedure entry env))
+
+(define (compiled-procedure? proc)
+	(tagged-list? proc 'compiled-procedure))
+
+(define (compiled-procedure-entry c-proc) (cadr c-proc))
+
+(define (compiled-procedure-env c-proc) (caddr c-proc))
+
+; When we compile the lambda expression, we also generate the code for
+; the procedure body. Although the body won’t be executed at the time
+; of procedure construction, it is convenient to insert it into the object
+; code right after the code for the lambda. But if the linkage is next,
+; we will need to skip around the code for the procedure body by using a
+; linkage that jumps to a label that is inserted aer the body
+
+(define (compile-lambda exp target linkage compile-env)
+	(let ((proc-entry (make-label 'entry))
+			(after-lambda (make-label 'after-lambda)))
+		
+		(let ((lambda-linkage (if (eq? linkage 'next) after-lambda linkage)))
+			
+			(append-instruction-sequences
+				(tack-on-instruction-sequence
+						(end-with-linkage lambda-linkage
+							(make-instruction-sequence '(env) (list target)
+										`((assign ,target (op make-compiled-procedure) (label ,proc-entry) (reg env)))))
+							(compile-lambda-body exp proc-entry compile-env))
+				after-lambda))))
+
+(define (compile-time-environment-add compile-env vars)
+	(if (eq? '() vars)
+		compile-env
+		(cons vars compile-env)
+		)
+	)
+
+(define (compile-sequence-defs seq target linkage compile-env defs-vars)
+	(let ((result (map 
+					(lambda (data)
+							(list 'set! (car data) (cdr data)))
+					defs-vars)))
+		(compile-sequence (append result (filter-defines seq)) target linkage compile-env)
+		)
+	)
+
+; This code begins with a label for the entry point. Next come instructions
+;  that will cause the run-time evaluation environment to switch
+; to the correct environment for evaluating the procedure body
+
+(define (compile-lambda-body exp proc-entry compile-env)
+	(let ((formals (lambda-parameters exp))
+			(defs (scan-defines (lambda-body exp))))
+
+			(if (eq? '() defs)
+
+				(append-instruction-sequences
+					(make-instruction-sequence '(env proc argl) '(env)
+						`(,proc-entry
+							 (assign env (op compiled-procedure-env) (reg proc))
+						 	(assign env (op extend-environment) (const ,formals) (reg argl) (reg env))))
+					(compile-sequence (lambda-body exp) 'val 'return (compile-time-environment-add compile-env formals)))
+
+
+				(let ((defs-vars (map car defs))
+						(defs-holds (map (lambda (param) '*unassigned) defs)))
+
+							(append-instruction-sequences
+								(make-instruction-sequence '(env proc argl) '(env)
+									`(,proc-entry
+						 					(assign env (op compiled-procedure-env) (reg proc))
+						 					(assign env (op extend-environment) (const ,formals) (reg argl) (reg env))
+						 					(assign env (op extend-environment) (const ,defs-vars) (reg ,defs-holds) (reg env))
+						 					))
+								(compile-sequence-defs (lambda-body exp) 'val 'return (compile-time-environment-add compile-env formals) defs))
+					)
+
+				)
+		)
+)
+
+; ⟨compilation of operator, target proc, linkage next⟩
+; ⟨evaluate operands and construct argument list in argl⟩
+; ⟨compilation of procedure call with given target and linkage⟩
+
+; the code that performs the procedure call compile-procedure-call
+
+
+(define (compile-application exp target linkage compile-env)
+	(let ((proc-code (compile (operator exp) 'proc 'next compile-env))
+		  (operand-codes
+				(map (lambda (operand) (compile operand 'val 'next compile-env))
+					 (operands exp))))
+
+		(preserving '(env continue) proc-code
+				(preserving '(proc continue) (construct-arglist operand-codes)
+							(compile-procedure-call target linkage)))))
+
+
+(define (compile-plus exp target linkage compile-env)
+	(compile-primitive-operation '+ exp target linkage compile-env)
+	)
+(define (compile-minus exp target linkage compile-env)
+	(compile-primitive-operation '- exp target linkage compile-env)
+	)
+(define (compile-equal exp target linkage compile-env)
+	(compile-primitive-operation '= exp target linkage compile-env)
+	)
+(define (compile-mult exp target linkage compile-env)
+	(compile-primitive-operation '* exp target linkage compile-env)
+	)
+
+
+(define (compile-primitive-operation op exp target linkage compile-env)
+	(if (eq? (find-variable op compile-env) 'not-found)
+
+		(let ((arguments (spread-arguments-multiple op (operands exp) compile-env)))
+			(preserving 
+				'(env continue)
+				arguments
+				(end-with-linkage
+					linkage
+					 (make-instruction-sequence '(arg1 arg2) '(val arg1 arg2) `((assign ,target (op ,op) (reg arg1) (reg arg2)))))
+				)
+			)
+
+		(compile-application exp target linkage compile-env)
+
+		)
+	)
+
+(define (spread-arguments-multiple op operands-list compile-env)
+	(define (rest-spread operands)
+		(if (null? (cdr operands))
+			(append-instruction-sequences
+				(make-instruction-sequence '(arg1 arg2) '(val) `((assign val (op ,op) (reg arg1) (reg arg2))))
+				(append-instruction-sequences
+					(make-instruction-sequence '(val) '(arg1) `((assign arg1 (reg val))))
+							(append-instruction-sequences 
+									(make-instruction-sequence '(arg1) '() `((save arg1)))
+										(append-instruction-sequences 
+											(compile (car operands) 'arg2 'next compile-env)
+											(make-instruction-sequence '(arg1) '() `((restore arg1)))
+												)
+											)))
+			(append-instruction-sequences
+				(preserving '(arg1) 
+					(append-instruction-sequences
+						(make-instruction-sequence '(arg1 arg2) '(val) `((assign val (op ,op) (reg arg2) (reg arg2))))
+						(make-instruction-sequence '(val) '(arg1) `((assign arg1 (reg val))))
+						)
+					(compile (car operands) 'arg1 'next compile-env)
+					)
+				(rest-spread (cdr operands))
+			)
+			)
+
+		)
+
+	(define (first-spread operands)
+		(cond ((null? operands)
+				(append-instruction-sequences 
+						(make-instruction-sequence '() '(arg1) '((assign arg1 (const ()))))
+						(make-instruction-sequence '() '(arg2) '((assign arg2 (const ())))))
+				)
+
+				((null? (cddr operands))
+					(preserving '(arg1) (compile (car operands) 'arg1 'next compile-env)
+						(compile (cadr operands) 'arg2 'next compile-env)))
+
+				(else (append-instruction-sequences
+									(append-instruction-sequences
+										(compile (car operands) 'arg1 'next compile-env) 
+										(append-instruction-sequences 
+											(make-instruction-sequence '(arg1) '() `((save arg1)))
+											(append-instruction-sequences 
+												(compile (cadr operands) 'arg2 'next compile-env)
+												(make-instruction-sequence '(arg1) '() `((restore arg1)))
+												)
+											)
+										)
+									(rest-spread (cddr operands))
+						)
+				)
+
+			)
+		)
+
+	(first-spread operands-list)
+)
+
+(define (spread-arguments operands compile-env)
+	(if (null? operands)
+			(append-instruction-sequences 
+				(make-instruction-sequence '() '(arg1) '((assign arg1 (const ()))))
+				(make-instruction-sequence '() '(arg2) '((assign arg2 (const ()))))
+			)
+
+			(let   ((first-arg (compile (car operands) 'arg1 'next compile-env))
+					(second-arg (compile (cadr operands) 'arg2 'next compile-env)))
+				
+					(preserving '(arg1) first-arg second-arg))
+	)
+)
+
+
+
+; implementation of "left to right" operand evaluation
+(define (construct-arglist-left-to-right operand-codes)
+	(let ((operand-codes operand-codes))
+		(if (null? operand-codes)
+			(make-instruction-sequence '() '(argl) '((assign argl (const ()))))
+			(let 
+				((code-to-get-first-arg 
+					(append-instruction-sequences 
+						(car operand-codes)
+						(make-instruction-sequence '(val) '(argl) '((assign argl (op list) (reg val)))))))
+
+				(if (null? (cdr operand-codes))
+					code-to-get-first-arg
+					(preserving '(env)
+							code-to-get-first-arg
+							(code-to-get-rest-args-left-to-right
+								(cdr operand-codes))))))))
+
+(define (code-to-get-rest-args-left-to-right operand-codes)
+	(let ((code-for-next-arg
+			 (preserving
+			  '(argl) 
+			  (car operand-codes)
+			  (make-instruction-sequence '(val argl) '(argl)
+			'((assign argl (op adjoin-arg) (reg val) (reg argl)))))))
+
+		(if (null? (cdr operand-codes))
+			code-for-next-arg
+			(preserving '(env) 
+				code-for-next-arg
+				(code-to-get-rest-args (cdr operand-codes))))))
+
+; Since we cons the arguments onto argl in sequence, we must
+; start with the last argument and end with the ﬁrst
+
+; argl and env must be preserved around each operand evaluation
+; The construct-arglist procedure
+; takes as arguments the code that evaluates the individual operands
+
+(define (construct-arglist operand-codes)
+	(let ((operand-codes (reverse operand-codes)))
+		(if (null? operand-codes)
+			(make-instruction-sequence '() '(argl) '((assign argl (const ()))))
+			(let 
+				((code-to-get-last-arg 
+					(append-instruction-sequences 
+						(car operand-codes)
+						(make-instruction-sequence '(val) '(argl) '((assign argl (op list) (reg val)))))))
+
+				(if (null? (cdr operand-codes))
+					code-to-get-last-arg
+					(preserving '(env)
+							code-to-get-last-arg
+							(code-to-get-rest-args
+							(cdr operand-codes))))))))
+
+
+(define (code-to-get-rest-args operand-codes)
+	(let ((code-for-next-arg
+			 (preserving
+			  '(argl) 
+			  (car operand-codes)
+			  (make-instruction-sequence '(val argl) '(argl)
+			'((assign argl (op cons) (reg val) (reg argl)))))))
+
+		(if (null? (cdr operand-codes))
+			code-for-next-arg
+			(preserving '(env) 
+				code-for-next-arg
+				(code-to-get-rest-args (cdr operand-codes))))))
+
+
+; (test (op primitive-procedure?) (reg proc))
+; 	(branch (label primitive-branch))
+; compiled-branch
+; 	⟨code to apply compiled procedure with given target
+; 	and appropriate linkage⟩
+; primitive-branch
+; 	(assign ⟨target⟩ (op apply-primitive-procedure) (reg proc) (reg argl))
+; 	⟨linkage⟩
+; after-call
+
+; Observe that the compiled branch must skip around the primitive branch.
+; erefore, if the linkage for the original procedure call was next, the
+; compound branch must use a linkage that jumps to a label that is in-
+; serted aer the primitive branch.
+
+
+(define (compile-procedure-call target linkage)
+	(let ((primitive-branch (make-label 'primitive-branch))
+			(compiled-branch (make-label 'compiled-branch))
+			(after-call (make-label 'after-call)))
+
+			(let ((compiled-linkage (if (eq? linkage 'next) after-call linkage)))
+				
+				(append-instruction-sequences 
+					(make-instruction-sequence 
+						'(proc) '() 
+						`((test (op primitive-procedure?) (reg proc))
+						 (branch (label ,primitive-branch))))
+					(parallel-instruction-sequences
+						(append-instruction-sequences
+						 compiled-branch
+						(compile-proc-appl target compiled-linkage))
+						(append-instruction-sequences
+							primitive-branch
+							(end-with-linkage linkage
+								(make-instruction-sequence '(proc argl)
+									(list target)
+									`((assign ,target (op apply-primitive-procedure) (reg proc) (reg argl)))))))
+					after-call))))
+
+
+; (assign continue (label proc-return))
+; (assign val (op compiled-procedure-entry) (reg proc)) -- get procedure label
+; (goto (reg val))
+;proc-return
+; (assign ⟨target⟩ (reg val))
+; (goto (label ⟨linkage⟩))
+
+; compile-proc-appl generates the above procedure-application code
+; by considering four cases, depending on whether the target for the call
+; is val and whether the linkage is return.
+
+(define (compile-proc-appl target linkage)
+	(cond ((and (eq? target 'val) (not (eq? linkage 'return)))
+			(make-instruction-sequence '(proc) all-regs
+				`((assign continue (label ,linkage))
+				(assign val (op compiled-procedure-entry) (reg proc))
+				(goto (reg val)))))
+		((and (not (eq? target 'val))
+			  (not (eq? linkage 'return)))
+				(let ((proc-return (make-label 'proc-return)))
+						(make-instruction-sequence '(proc) all-regs
+							`((assign continue (label ,proc-return))
+							 (assign val (op compiled-procedure-entry) (reg proc))
+							 (goto (reg val))
+							,proc-return
+							(assign ,target (reg val))
+							(goto (label ,linkage))))))
+		((and (eq? target 'val) (eq? linkage 'return))
+				(make-instruction-sequence
+					'(proc continue)
+					all-regs
+					'((assign val (op compiled-procedure-entry)(reg proc))
+					(goto (reg val)))))
+		((and (not (eq? target 'val))
+				(eq? linkage 'return))
+					(error "return linkage, target not val: COMPILE" target))))
+
+
+(define (registers-needed s)
+(if (symbol? s) '() (car s)))
+(define (registers-modified s)
+(if (symbol? s) '() (cadr s)))
+(define (statements s)
+(if (symbol? s) (list s) (caddr s)))
+
+(define (needs-register? seq reg)
+(memq reg (registers-needed seq)))
+(define (modifies-register? seq reg)
+(memq reg (registers-modified seq)))
+
+(define (list-union s1 s2)
+(cond ((null? s1) s2)
+		((memq (car s1) s2) (list-union (cdr s1) s2))
+		(else (cons (car s1) (list-union (cdr s1) s2)))))
+
+(define (list-difference s1 s2)
+	(cond ((null? s1) '())
+			((memq (car s1) s2) (list-difference (cdr s1) s2))
+			(else (cons (car s1) (list-difference (cdr s1) s2)))))
+
+
+; This takes two instruction sequences seq1 and seq2 and returns the 
+; instruction sequence whose statements are the statements of seq1 fol-
+; lowed by the statements of seq2, whose modiﬁed registers are those
+; registers that are modiﬁed by either seq1 or seq2, and whose needed
+; registers are the registers needed by seq1 together with those registers
+; needed by seq2 that are not modiﬁed by seq1.
+
+(define (append-instruction-sequences . seqs)
+	(define (append-2-sequences seq1 seq2)
+		(make-instruction-sequence
+			(list-union
+				(registers-needed seq1)
+				(list-difference (registers-needed seq2)
+								(registers-modified seq1)))
+			(list-union (registers-modified seq1)
+						(registers-modified seq2))
+			(append (statements seq1) (statements seq2))))
+	(define (append-seq-list seqs)
+		(if (null? seqs)
+			(empty-instruction-sequence)
+			(append-2-sequences 
+				(car seqs)
+				(append-seq-list (cdr seqs)))
+		)
+	)
+
+(append-seq-list seqs))
+
+
+; It returns an instruction sequence
+; whose statements are the statements of seq1 followed by the statements
+; of seq2, with appropriate save and restore instructions around seq1
+; to protect the registers in regs that are modiﬁed by seq1 but needed by
+; seq2.
+; The following procedure implements this strategy recursively, walking
+; down the list of registers to be preserved
+
+(define (preserving regs seq1 seq2)
+	(if (null? regs)
+		(append-instruction-sequences seq1 seq2)
+		(let ((first-reg (car regs)))
+			(if (and (needs-register? seq2 first-reg) (modifies-register? seq1 first-reg))
+				(preserving (cdr regs)
+					(make-instruction-sequence
+						(list-union (list first-reg)
+									(registers-needed seq1))
+					(list-difference (registers-modified seq1)
+									(list first-reg))
+					(append `((save ,first-reg))
+							 (statements seq1)
+							`((restore ,first-reg))))
+					seq2)
+
+				(preserving (cdr regs) seq1 seq2)))))
+
+; Because the procedure body is not “in line” to be executed as part of the
+; combined sequence, its register use has no impact on the register use
+; of the sequence in which it is embedded. We thus ignore the procedure
+; body’s sets of needed and modiﬁed registers when we tack it onto the
+; other sequence.
+
+(define (tack-on-instruction-sequence seq body-seq)
+	(make-instruction-sequence
+		(registers-needed seq)
+		(registers-modified seq)
+		(append (statements seq) (statements body-seq))))
+
+; The two branches will never be executed sequentially;
+; for any particular evaluation of the test, one branch or the other will be
+; entered. Because of this, the registers needed by the second branch are
+; still needed by the combined sequence
+
+(define (parallel-instruction-sequences seq1 seq2)
+	(make-instruction-sequence
+		(list-union (registers-needed seq1)
+					(registers-needed seq2))
+		(list-union (registers-modified seq1)
+					(registers-modified seq2))
+		(append (statements seq1) (statements seq2))))
+
+
+
+  (compile
+   '((define (test + * a b x y)
+(+ (* a x) (* b y)))
+(test (lambda (q n) (- q n)) (lambda (q n) (- q n)) 1 2 3 4))
+   'val
+   'next
+   '())
+
+
+
+
+
+
+
+
+
